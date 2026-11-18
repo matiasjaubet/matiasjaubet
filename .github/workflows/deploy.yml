@@ -15,6 +15,15 @@ jobs:
           username: root
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
+          # Se entra como root, pero todo (git, npm, build y PM2) corre como el usuario del sitio,
+          # para que la app no tenga permisos de root. Su PM2 lo levanta pm2-matiasjaubet.service
+          # (que también corre la API Strapi). Si algo falla, el deploy falla (en rojo) y no se reinicia.
           script: |
-            cd /home/matiasjaubet/htdocs/matiasjaubet.com/matiasjaubet
-            ./deploy.sh
+            set -e
+            sudo -u matiasjaubet -H env PATH=/opt/node-v20.19.6/bin:/usr/bin:/bin PM2_HOME=/home/matiasjaubet/.pm2 bash -ec '
+              cd /home/matiasjaubet/htdocs/matiasjaubet.com/matiasjaubet
+              git pull --ff-only origin main
+              npm install --no-audit --no-fund
+              npm run build
+              pm2 restart next-site
+            '
