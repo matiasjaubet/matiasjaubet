@@ -1,29 +1,65 @@
-name: Deploy Next.js
+# Cada push a main: publica la imagen en GHCR y la despliega en el VPS 7Lakes (Hostinger)
+# → matiasjaubet.com. En el VPS, el usuario `deploy` solo puede correr /usr/local/sbin/7lakes-deploy
+# (ver matiasjaubet/7lakes-ops/infra/bin). El GITHUB_TOKEN del job se usa para bajar la imagen
+# y vence al terminar. Si faltan los secretos VPS_SSH_KEY / VPS_KNOWN_HOSTS, publica la imagen
+# pero no despliega.
+name: Deploy
+
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/matiasjaubet/matiasjaubet
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
         with:
-          host: ${{ secrets.SERVER_IP }}
-          username: root
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: 22
-          # Se entra como root, pero todo (git, npm, build y PM2) corre como el usuario del sitio,
-          # para que la app no tenga permisos de root. Su PM2 lo levanta pm2-matiasjaubet.service
-          # (que también corre la API Strapi). Si algo falla, el deploy falla (en rojo) y no se reinicia.
-          script: |
-            set -e
-            sudo -u matiasjaubet -H env PATH=/opt/node-v20.19.6/bin:/usr/bin:/bin PM2_HOME=/home/matiasjaubet/.pm2 bash -ec '
-              cd /home/matiasjaubet/htdocs/matiasjaubet.com/matiasjaubet
-              git pull --ff-only origin main
-              npm install --no-audit --no-fund
-              npm run build
-              pm2 restart next-site
-            '
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Imagen → GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            NEXT_PUBLIC_STRAPI_URL=${{ vars.NEXT_PUBLIC_STRAPI_URL }}
+            NEXT_PUBLIC_RECAPTCHA_SITE_KEY=${{ vars.NEXT_PUBLIC_RECAPTCHA_SITE_KEY }}
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Desplegar en el VPS
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$SSH_KEY" ]; then echo "::warning::Falta el secreto VPS_SSH_KEY: imagen publicada, sin desplegar."; exit 0; fi
+          install -m 700 -d ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+          echo "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          echo "$GH_TOKEN" | ssh -p 52022 deploy@179.66.133.34 \
+            sudo /usr/local/sbin/7lakes-deploy matiasjaubet "${{ github.actor }}"
